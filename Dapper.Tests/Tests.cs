@@ -2526,6 +2526,22 @@ end");
 #endif
         }
 
+#if ENTITY_FRAMEWORK
+        public void Issue570_DbGeo_HasValues()
+        {
+            Dapper.EntityFramework.Handlers.Register();
+            string redmond = "POINT (122.1215 47.6740)";
+            DbGeography point = DbGeography.PointFromText(redmond, DbGeography.DefaultCoordinateSystemId);
+            DbGeography orig = point.Buffer(20);
+
+
+            var fromDb = connection.QuerySingle<DbGeography>("declare @geos table(geo geography); insert @geos(geo) values(@val); select * from @geos",
+                new { val = orig });
+
+            fromDb.Area.IsNotNull();
+            fromDb.Area.IsEqualTo(orig.Area);
+        }
+#endif
         [Fact]
         public void Issue142_FailsNamedStatus()
         {
@@ -3058,6 +3074,45 @@ end");
             if (open) conn.Open();
             return conn;
         }
+
+        [FactMySql]
+        public void Issue552_SignedUnsignedBooleans()
+        {
+
+            using (var conn = GetMySqlConnection(true, false, false))
+            {
+                conn.Execute(@"
+CREATE TEMPORARY TABLE IF NOT EXISTS `bar` (
+  `id` INT NOT NULL,
+  `bool_val` BOOL NULL,
+  PRIMARY KEY (`id`));
+  
+  truncate table bar;
+  insert bar (id, bool_val) values (1, null);
+  insert bar (id, bool_val) values (2, 0);
+  insert bar (id, bool_val) values (3, 1);
+  insert bar (id, bool_val) values (4, null);
+  insert bar (id, bool_val) values (5, 1);
+  insert bar (id, bool_val) values (6, 0);
+  insert bar (id, bool_val) values (7, null);
+  insert bar (id, bool_val) values (8, 1);");
+
+                var rows = conn.Query<MySqlHasBool>("select * from bar;").ToDictionary(x => x.Id);
+
+                rows[1].Bool_Val.IsNull();
+                rows[2].Bool_Val.IsEqualTo(false);
+                rows[3].Bool_Val.IsEqualTo(true);
+                rows[4].Bool_Val.IsNull();
+                rows[5].Bool_Val.IsEqualTo(true);
+                rows[6].Bool_Val.IsEqualTo(false);
+                rows[7].Bool_Val.IsNull();
+                rows[8].Bool_Val.IsEqualTo(true);
+            }
+        }
+        class MySqlHasBool {
+            public int Id {get;set;}
+            public bool? Bool_Val {get;set;}
+        }
         [FactMySql]
         public void Issue295_NullableDateTime_MySql_Default()
         {
@@ -3263,7 +3318,51 @@ end");
                 }
             }
         }
-        
+
+        [Fact]
+        public void Issue569_SO38527197_PseudoPositionalParameters_In()
+        {
+            using (var connection = ConnectViaOledb())
+            {
+                int[] ids = { 1, 2, 5, 7 };
+                var list = connection.Query<int>("select * from string_split('1,2,3,4,5',',') where value in ?ids?", new { ids }).AsList();
+                list.Sort();
+                string.Join(",", list).IsEqualTo("1,2,5");
+            }
+        }
+
+        [Fact]
+        public void PseudoPositional_CanUseVariable()
+        {
+            using (var connection = ConnectViaOledb())
+            {
+                int id = 42;
+                var row = connection.QuerySingle("declare @id int = ?id?; select @id as [A], @id as [B];", new { id });
+                int a = (int)row.A;
+                int b = (int)row.B;
+                a.IsEqualTo(42);
+                b.IsEqualTo(42);
+            }
+        }
+        [Fact]
+        public void PseudoPositional_CannotUseParameterMultipleTimes()
+        {
+
+            using (var connection = ConnectViaOledb())
+            {
+                try
+                {
+                    int id = 42;
+                    var row = connection.QuerySingle("select ?id? as [A], ?id? as [B];", new { id });
+                    Assert.Fail();
+                }
+                catch (InvalidOperationException ex) when (ex.Message == "When passing parameters by position, each parameter can only be referenced once")
+                {
+                    // that's a win
+                }
+            }
+        }
+
         [Fact]
         public void PseudoPositionalParameters_ExecSingle()
         {
