@@ -2484,6 +2484,52 @@ end");
             }
         }
 
+
+        public class RecordingTypeHandler<T> : Dapper.SqlMapper.TypeHandler<T>
+        {
+            public override void SetValue(IDbDataParameter parameter, T value)
+            {
+                SetValueWasCalled = true;
+                parameter.Value = value;
+            }
+
+            public override T Parse(object value)
+            {
+                ParseWasCalled = true;
+                return (T)value;
+            }
+
+            public bool SetValueWasCalled { get; set; }
+            public bool ParseWasCalled { get; set; }
+        }
+
+        [Fact]
+        public void Test_RemoveTypeMap()
+        {
+            Dapper.SqlMapper.ResetTypeHandlers();
+            Dapper.SqlMapper.RemoveTypeMap(typeof(DateTime));
+
+            var dateTimeHandler = new RecordingTypeHandler<DateTime>();
+            Dapper.SqlMapper.AddTypeHandler(dateTimeHandler);
+
+            connection.Execute("CREATE TABLE #Test_RemoveTypeMap (x datetime NOT NULL);");
+
+            try
+            {
+                connection.Execute(@"INSERT INTO #Test_RemoveTypeMap VALUES (@Now)", new { DateTime.Now });
+                connection.Query<DateTime>("SELECT * FROM #Test_RemoveTypeMap");
+
+                dateTimeHandler.ParseWasCalled.IsTrue();
+                dateTimeHandler.SetValueWasCalled.IsTrue();
+            }
+            finally
+            {
+                connection.Execute("DROP TABLE #Test_RemoveTypeMap");
+                Dapper.SqlMapper.AddTypeMap(typeof(DateTime), DbType.DateTime); // or an option to reset type map?
+            }
+            
+        }
+
         [Fact]
         public void Issue130_IConvertible()
         {
@@ -3768,35 +3814,6 @@ insert TPTable (Value) values (2), (568)");
         {
             public int Id { get; }
             public string Name { get; } = "abc";
-        }
-
-        [Fact]
-        public void GuidBytesWork()
-        {
-            var guid = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
-            var bytes = BitConverter.ToString(guid.ToByteArray());
-            try { connection.Execute("drop table GuidBytes"); } catch { }
-            connection.Execute("create table GuidBytes(a uniqueidentifier not null, b binary(16) not null)");
-            connection.Execute("insert GuidBytes(a,b) values (@a, @b)", new { a = guid, b = guid });
-
-            // via <Guid>
-            var guid2 = connection.QuerySingle<Guid>("select a from GuidBytes");
-            guid2.IsEqualTo(guid);
-
-            guid2 = connection.QuerySingle<Guid>("select b from GuidBytes");
-            guid2.IsEqualTo(guid);
-
-            // via <HasGuid>
-            guid2 = connection.QuerySingle<HazGUid>("select a as [Value] from GuidBytes").Value;
-            guid2.IsEqualTo(guid);
-
-            guid2 = connection.QuerySingle<HazGUid>("select b as [Value] from GuidBytes").Value;
-            guid2.IsEqualTo(guid);
-        }
-
-        public class HazGUid
-        {
-            public Guid Value { get; set; }
         }
     }
 }
