@@ -1,4 +1,5 @@
-﻿//
+﻿#if !COREFX
+//
 // Fork of https://github.com/vijaysg
 // https://gist.github.com/vijaysg/3096151
 // Extends dapper-dot-net
@@ -9,7 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
-using Oracle.ManagedDataAccess.Client;
+using Oracle.ManagedDataAccess.Client; // not yet available .NetStandard / COREFX
 
 namespace Dapper
 {
@@ -109,6 +110,7 @@ namespace Dapper
         /// <param name="dbType"></param>
         /// <param name="direction"></param>
         /// <param name="size"></param>
+        /// <param name="isAssociativeArray"></param>
         public void Add(string name, object value = null, OracleDbType? dbType = null,
             ParameterDirection? direction = null, int? size = null, bool isAssociativeArray = false)
         {
@@ -250,3 +252,4 @@ namespace Dapper
         }
     }
 }
+#endif

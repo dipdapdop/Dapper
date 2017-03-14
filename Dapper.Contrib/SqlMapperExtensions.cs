@@ -7,13 +7,13 @@ using System.Text;
 using System.Collections.Concurrent;
 using System.Reflection.Emit;
 using Dapper;
-using Oracle.ManagedDataAccess.Client;
 using static Dapper.Contrib.Extensions.SqlMapperExtensions;
 
 #if COREFX
 using DataException = System.InvalidOperationException;
 #else
 using System.Threading;
+using Oracle.ManagedDataAccess.Client;
 #endif
 
 namespace Dapper.Contrib.Extensions
@@ -39,6 +39,7 @@ namespace Dapper.Contrib.Extensions
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ExplicitKeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> TypeProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ComputedProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
+        private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ColumnProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> TypeTableName = new ConcurrentDictionary<RuntimeTypeHandle, string>();
 
@@ -53,8 +54,10 @@ namespace Dapper.Contrib.Extensions
                 {"sqlceconnection", new SqlCeServerAdapter()},
                 {"npgsqlconnection", new PostgresAdapter()},
                 {"sqliteconnection", new SQLiteAdapter()},
-                {"mysqlconnection", new MySqlAdapter()},
-                {"oracleconnection", new OracleAdapter()}
+                {"mysqlconnection", new MySqlAdapter()}
+#if! COREFX
+                ,{"oracleconnection", new OracleAdapter()}
+#endif
             };
 
 
@@ -62,6 +65,10 @@ namespace Dapper.Contrib.Extensions
         private static string PropertyInfoToColumnNameCache(PropertyInfo propertyInfo)
         {
             string name = null;
+
+            //var ci = propertyInfo.GetCustomAttributes(false)
+            //    .OfType<ColumnAttribute>();
+
             if (PropertyInfoToColumnName.TryGetValue(propertyInfo, out name))
             {
                 return name;
@@ -70,6 +77,16 @@ namespace Dapper.Contrib.Extensions
             {
                 name = propertyInfo.Name;
             }
+            // SIM: use the column attribute as defined on the property 
+            // as an override to the 'fallback' general ColumnNameMapper strategy.
+            // (See #32 for why we need it.)
+
+
+
+            //if (hasColumnAttribute)
+            //{
+            //    name = 
+            //}
             else
             {
                 name = ColumnNameMapper(propertyInfo);
@@ -148,6 +165,25 @@ namespace Dapper.Contrib.Extensions
             return properties.ToList();
         }
 
+        /// <summary>
+        /// Added SIM:
+        /// </summary>
+        /// <param name="type"></param>
+        /// <returns></returns>
+        private static List<PropertyInfo> ColumnPropertiesCache(Type type)
+        {
+            IEnumerable<PropertyInfo> pi;
+            if (ColumnProperties.TryGetValue(type.TypeHandle, out pi))
+            {
+                return pi.ToList();
+            }
+
+            var columnPropertiesCache = TypePropertiesCache(type).Where(p => p.GetCustomAttributes(true).Any(a => a is ColumnAttribute)).ToList();
+
+            ColumnProperties[type.TypeHandle] = columnPropertiesCache;
+            return columnPropertiesCache;
+        }
+
         private static bool IsWriteable(PropertyInfo pi)
         {
             var attributes = pi.GetCustomAttributes(typeof(WriteAttribute), false).AsList();
@@ -157,52 +193,195 @@ namespace Dapper.Contrib.Extensions
             return writeAttribute.Write;
         }
 
-        private static PropertyInfo GetSingleKey<T>(string method)
+        private static List<PropertyInfo> GetAllKeys(Type type)
         {
-            var type = typeof(T);
-            var keys = KeyPropertiesCache(type);
-            var explicitKeys = ExplicitKeyPropertiesCache(type);
-            var keyCount = keys.Count + explicitKeys.Count;
-            if (keyCount > 1)
-                throw new DataException($"{method}<T> only supports an entity with a single [Key] or [ExplicitKey] property");
-            if (keyCount == 0)
-                throw new DataException($"{method}<T> only supports an entity with a [Key] or an [ExplicitKey] property");
+            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
+            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
 
-            return keys.Any() ? keys.First() : explicitKeys.First();
+            keyProperties.AddRange(explicitKeyProperties);
+
+            if (!keyProperties.Any())
+                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
+
+            return keyProperties;
+        }
+
+        private static string GenerateGetQuery(IDbConnection connection, Type type, dynamic identity, List<PropertyInfo> keyProperties)
+        {
+            string sql;
+            Type identityType = identity?.GetType();
+
+            // Generate query
+            if (!GetQueries.TryGetValue(type.TypeHandle, out sql))
+            {
+                var name = GetTableName(type);
+
+                if (keyProperties.Count == 1)
+                {
+                    var key = keyProperties.First();
+                    sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
+                }
+                else
+                {
+                    var sb = new StringBuilder();
+                    sb.Append($"select * from {name} where ");
+
+                    var adapter = GetFormatter(connection);
+
+                    for (var i = 0; i < keyProperties.Count; i++)
+                    {
+
+                        // SIM: HACK: AppendColumnNameEqualsValue takes a string not a PropertyInfo type.
+                        //adapter.AppendColumnNameEqualsValue(sb, property.Name);  //fix for issue #336 (dapper)
+                        {
+
+                            var isParamSameType = identityType == type;
+                            var keyTypeProperties = isParamSameType ? null : identityType.GetProperties();
+
+                            var property = keyProperties.ElementAt(i);
+                            var parameterName = property.Name;
+
+                            // if key object passed is the same type as expected result, use property
+                            var paramProperty = isParamSameType ? property :
+                                keyTypeProperties.FirstOrDefault(
+                                    p => p.Name.Equals(property.Name, StringComparison.CurrentCultureIgnoreCase)
+                                );
+
+                            dynamic paramPropertyValue = paramProperty?.GetValue(identity, null);
+                            bool isArray = paramPropertyValue?.GetType().IsArray ?? default(bool);
+
+                            sb.Append("(");
+                            adapter.AppendColumnName(sb, PropertyInfoToColumnNameCache(property));
+
+                            // #20 LGH/lgh-dapper-api
+                            sb.Append(isArray ? " in " : " = "); // isParamSameType may be enough
+
+                            if (isArray)
+                            {
+                                sb.Append("(");
+                                var j = 1;
+
+                                // isArray should be the guard clause here.
+                                // ReSharper disable once PossibleNullReferenceException
+                                foreach (dynamic ppv in paramPropertyValue)
+                                {
+                                    adapter.AppendParameter(sb, parameterName + j); //implicit cast
+                                    if (j < paramPropertyValue.Length)
+                                        sb.Append(", ");
+                                    j++;
+                                }
+                                // SIM: we don't need the null test in here.
+                                sb.Append(")");
+                                sb.Append(")");
+                            }
+                            else
+                            {
+                                adapter.AppendParameter(sb, parameterName);
+                                sb.Append(" or ");
+                                adapter.AppendParameter(sb, parameterName);
+                                sb.Append(" is null");
+                                sb.Append(")");
+                            }
+                        }
+
+                        if (i < keyProperties.Count - 1)
+                            sb.AppendFormat(" and ");
+                    }
+
+                    sql = sb.ToString();
+                }
+
+                GetQueries[type.TypeHandle] = sql;
+            }
+
+            return sql;
+        }
+
+        private static DynamicParameters GenerateGetParams(Type type, dynamic identity, List<PropertyInfo> keyProperties)
+        {
+
+            var dynParms = new DynamicParameters();
+            Type identityType = identity?.GetType();
+
+            if (keyProperties.Count == 1 && (identityType == null || identityType.IsValueType()))
+            {
+                dynParms.Add($":{keyProperties.First().Name}", identity);
+            }
+            else
+            {
+                if (identityType == null || identityType.IsValueType())
+                    throw new ArgumentException($"The key object passed cannot be null or value type for composite key in {type.Name}");
+
+                var isParamSameType = identityType == type;
+                var keyTypeProperties = isParamSameType ? null : identityType.GetProperties();
+
+                for (var i = 0; i < keyProperties.Count; i++)
+                {
+                    var property = keyProperties.ElementAt(i);
+
+                    // if key object passed is the same type as expected result, use property
+                    var paramProperty = isParamSameType ? property :
+                        keyTypeProperties.FirstOrDefault(
+                            p => p.Name.Equals(property.Name, StringComparison.CurrentCultureIgnoreCase)
+                        );
+
+                    dynamic paramPropertyValue = paramProperty?.GetValue(identity, null);
+                    bool isArray = paramPropertyValue?.GetType().IsArray ?? default(bool);
+
+                    // SIM: not sure that this is necessary or desirable - we test against null in generated sql
+                    // as is the house style.
+                    //if (paramProperty == null)
+                    //    throw new ArgumentException($"The key object passed does not contain {property.Name} property.");
+
+                    // SIM: now test for null here using conditional access, will pass in null to dynParms list
+                    // (if null reference) which is the desired behaviour.
+                    //dynParms.Add($":{property.Name}", paramProperty.GetValue(identity, null));
+
+                    if (isArray)
+                    {
+                        var j = 1;
+                        // isArray should be the guard clause here.
+                        // ReSharper disable once PossibleNullReferenceException
+                        foreach (dynamic ppv in paramPropertyValue)
+                        {
+                            dynParms.Add($":{property.Name}{j}", ppv);
+                            j++;
+                        }
+                    }
+                    else
+                    {
+                        dynParms.Add($":{property.Name}", paramProperty?.GetValue(identity, null));
+                    }
+                }
+            }
+
+            return dynParms;
         }
 
         /// <summary>
-        /// Returns a single entity by a single id from table "Ts".  
-        /// Id must be marked with [Key] attribute.
+        /// Returns a single entity by a key from table "Ts".  
+        /// Keys must be marked with [Key] or [ExplicitKey] attributes.
         /// Entities created from interfaces are tracked/intercepted for changes and used by the Update() extension
         /// for optimal performance. 
         /// </summary>
         /// <typeparam name="T">Interface or type to create and populate</typeparam>
         /// <param name="connection">Open SqlConnection</param>
-        /// <param name="id">Id of the entity to get, must be marked with [Key] attribute</param>
+        ///<param name="identity">Single or composite Key object that represents the entity to get</param>
         /// <param name="transaction">The transaction to run under, null (the default) if none</param>
         /// <param name="commandTimeout">Number of seconds before command execution timeout</param>
         /// <returns>Entity of T</returns>
-        public static T Get<T>(this IDbConnection connection, dynamic id, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        public static T Get<T>(this IDbConnection connection, dynamic identity, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
         {
             var type = typeof(T);
 
-            string sql;
-            var key = GetSingleKey<T>(nameof(Get));
-            if (!GetQueries.TryGetValue(type.TypeHandle, out sql))
-            {
-                var name = GetTableName(type);
-                sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
-                GetQueries[type.TypeHandle] = sql;
-                //dynParms.Add($":{key.Name}", id);
-            }
+            List<PropertyInfo> keyProperties = GetAllKeys(type);
 
-            var dynParms = new DynamicParameters();
-            dynParms.Add($":{key.Name}", id);
+            var sql = GenerateGetQuery(connection, type, (object)identity, keyProperties);
+            DynamicParameters dynParms = GenerateGetParams(type, identity, keyProperties);
 
             T obj;
 
-            if (type.IsInterface)
+            if (type.IsInterface())
             {
                 var res = connection.Query(sql, dynParms).FirstOrDefault() as IDictionary<string, object>;
 
@@ -245,14 +424,14 @@ namespace Dapper.Contrib.Extensions
             string sql;
             if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
             {
-                GetSingleKey<T>(nameof(GetAll));
+                //GetSingleKey<T>(nameof(GetAll));
                 var name = GetTableName(type);
 
                 sql = "select * from " + name;
                 GetQueries[cacheType.TypeHandle] = sql;
             }
 
-            if (!type.IsInterface) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
+            if (!type.IsInterface()) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
 
             var result = connection.Query(sql);
             var list = new List<T>();
@@ -271,42 +450,43 @@ namespace Dapper.Contrib.Extensions
 
         }
 
-/*
-        public static IEnumerable<T> Query<T>(this IDbConnection connection, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
-        {
-            var type = typeof(T);
-            var cacheType = typeof(List<T>);
-
-            string sql;
-            if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
-            {
-                var key = GetSingleKey<T>(nameof(Query));
-                var name = GetTableName(type);
-
-                //sql = "select * from " + name;
-                sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
-                GetQueries[cacheType.TypeHandle] = sql;
-            }
-
-            if (!type.IsInterface) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
-
-            var result = connection.Query(sql);
-            var list = new List<T>();
-            foreach (IDictionary<string, object> res in result)
-            {
-                var obj = ProxyGenerator.GetInterfaceProxy<T>();
-                foreach (var property in TypePropertiesCache(type))
+        /*
+                public static IEnumerable<T> Query<T>(this IDbConnection connection, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
                 {
-                    var val = res[PropertyInfoToColumnNameCache(property)];
-                    property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
-                }
-                ((IProxy)obj).IsDirty = false;   //reset change tracking and return
-                list.Add(obj);
-            }
-            return list;
+                    var type = typeof(T);
+                    var cacheType = typeof(List<T>);
 
-        }
-*/
+                    string sql;
+                    if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
+                    {
+                        var key = GetSingleKey<T>(nameof(Query));
+                        var name = GetTableName(type);
+
+                        //sql = "select * from " + name;
+                        sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
+                        GetQueries[cacheType.TypeHandle] = sql;
+                    }
+
+                    if (!type.IsInterface) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
+
+                    var result = connection.Query(sql);
+                    var list = new List<T>();
+                    foreach (IDictionary<string, object> res in result)
+                    {
+                        var obj = ProxyGenerator.GetInterfaceProxy<T>();
+                        foreach (var property in TypePropertiesCache(type))
+                        {
+                            var val = res[PropertyInfoToColumnNameCache(property)];
+                            property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
+                        }
+                        ((IProxy)obj).IsDirty = false;   //reset change tracking and return
+                        list.Add(obj);
+                    }
+                    return list;
+
+                }
+        */
+
         /// <summary>
         /// Returns a list of entites from table "Ts".  
         /// Id of T must be marked with [Key] attribute.
@@ -315,36 +495,29 @@ namespace Dapper.Contrib.Extensions
         /// </summary>
         /// <typeparam name="T">Interface or type to create and populate</typeparam>
         /// <param name="connection">Open SqlConnection</param>
+        /// <param name="identity"></param>
         /// <param name="transaction">The transaction to run under, null (the default) if none</param>
         /// <param name="commandTimeout">Number of seconds before command execution timeout</param>
         /// <returns>Entity of T</returns>
-        public static IEnumerable<T> GetList<T>(this IDbConnection connection, dynamic id, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        public static IEnumerable<T> GetList<T>(this IDbConnection connection, dynamic /*id*/ identity, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
         {
             var type = typeof(T);
-            var cacheType = typeof(List<T>);
-            var dynParms = new DynamicParameters();
+            List<PropertyInfo> keyProperties = GetAllKeys(type);
+            // SIM: NB: do not change this to 'var' or else connection.Query call will complain
+            // about dynamic dispatch.
+            string sql = GenerateGetQuery(connection, type, identity, keyProperties);
+            DynamicParameters dynParms = GenerateGetParams(type, identity, keyProperties);
 
-            string sql;
-            var key = GetSingleKey<T>(nameof(GetList));
-            if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
-            {
-                var name = GetTableName(type);
-                sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
-                GetQueries[cacheType.TypeHandle] = sql;
-            }
-
-            dynParms.Add($":{key.Name}", id);
-
-            T obj;
             var list = new List<T>();
-            if (type.IsInterface)
+            if (type.IsInterface())
             {
+                // SIM: this call: 
                 var res = connection.Query(sql, dynParms).FirstOrDefault() as IDictionary<string, object>;
 
                 if (res == null)
                     return null;
 
-                obj = ProxyGenerator.GetInterfaceProxy<T>();
+                var obj = ProxyGenerator.GetInterfaceProxy<T>();
 
                 foreach (var property in TypePropertiesCache(type))
                 {
@@ -390,7 +563,7 @@ namespace Dapper.Contrib.Extensions
                 else
                 {
                     name = type.Name + "s";
-                    if (type.IsInterface && name.StartsWith("I"))
+                    if (type.IsInterface() && name.StartsWith("I"))
                         name = name.Substring(1);
                 }
             }
@@ -419,7 +592,7 @@ namespace Dapper.Contrib.Extensions
                 isList = true;
                 type = type.GetElementType();
             }
-            else if (type.IsGenericType)
+            else if (type.IsGenericType())
             {
                 isList = true;
                 type = type.GetGenericArguments()[0];
@@ -430,6 +603,7 @@ namespace Dapper.Contrib.Extensions
             var allProperties = TypePropertiesCache(type);
             var keyProperties = KeyPropertiesCache(type);
             var computedProperties = ComputedPropertiesCache(type);
+            var columnProperties = ColumnPropertiesCache(type); //TODO: 
             var allPropertiesExceptKeyAndComputed = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
 
             var adapter = GetFormatter(connection);
@@ -446,7 +620,8 @@ namespace Dapper.Contrib.Extensions
             for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
             {
                 var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
-                sbParameterList.AppendFormat("@{0}", property.Name);
+                //sbParameterList.Append($"@{property.Name}");
+                sbParameterList.Append($":{property.Name}");
                 if (i < allPropertiesExceptKeyAndComputed.Count - 1)
                     sbParameterList.Append(", ");
             }
@@ -493,23 +668,25 @@ namespace Dapper.Contrib.Extensions
             {
                 type = type.GetElementType();
             }
-            else if (type.IsGenericType)
+            else if (type.IsGenericType())
             {
                 type = type.GetGenericArguments()[0];
             }
 
-            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
-            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
-            if (!keyProperties.Any() && !explicitKeyProperties.Any())
-                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
+            //var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
+            //var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
+            //if (!keyProperties.Any() && !explicitKeyProperties.Any())
+            //    throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
+
+            var keyProperties = GetAllKeys(type);
 
             var name = GetTableName(type);
 
             var sb = new StringBuilder();
-            sb.AppendFormat("update {0} set ", name);
+            sb.Append($"update {name} set ");
 
             var allProperties = TypePropertiesCache(type);
-            keyProperties.AddRange(explicitKeyProperties);
+            //keyProperties.AddRange(explicitKeyProperties);
             var computedProperties = ComputedPropertiesCache(type);
             var nonIdProps = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
 
@@ -554,21 +731,17 @@ namespace Dapper.Contrib.Extensions
             {
                 type = type.GetElementType();
             }
-            else if (type.IsGenericType)
+            else if (type.IsGenericType())
             {
                 type = type.GetGenericArguments()[0];
             }
 
-            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
-            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
-            if (!keyProperties.Any() && !explicitKeyProperties.Any())
-                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
+            var keyProperties = GetAllKeys(type);
 
             var name = GetTableName(type);
-            keyProperties.AddRange(explicitKeyProperties);
 
             var sb = new StringBuilder();
-            sb.AppendFormat("delete from {0} where ", name);
+            sb.Append($"delete from {name} where ");
 
             var adapter = GetFormatter(connection);
 
@@ -780,6 +953,19 @@ namespace Dapper.Contrib.Extensions
         public string Name { get; set; }
     }
 
+    [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+    public class ColumnAttribute : Attribute
+    {
+        public ColumnAttribute(string name)
+        {
+            Name = name;
+        }
+
+        // ReSharper disable once MemberCanBePrivate.Global
+        // ReSharper disable once UnusedAutoPropertyAccessor.Global
+        public string Name { get; set; }
+    }
+
     // do not want to depend on data annotations that is not in client profile
     [AttributeUsage(AttributeTargets.Property)]
     public class KeyAttribute : Attribute
@@ -830,8 +1016,9 @@ public partial class SqlServerAdapter : ISqlAdapter
         var multi = connection.QueryMultiple(cmd, entityToInsert, transaction, commandTimeout);
 
         var first = multi.Read().FirstOrDefault();
-        if (first == null || first.id == null) return 0;
+        if (first == null || first?.id == null) return 0;
 
+        // ReSharper disable once PossibleNullReferenceException
         var id = (int)first.id;
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
         if (!propertyInfos.Any()) return id;
@@ -868,7 +1055,7 @@ public partial class SqlServerAdapter : ISqlAdapter
 public partial class SqlCeServerAdapter : ISqlAdapter
 {
     public bool SequenceSupported => false;
-    
+
     public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert)
     {
         var cmd = $"insert into {tableName} ({columnList}) values ({parameterList})";
@@ -1032,7 +1219,7 @@ public partial class SQLiteAdapter : ISqlAdapter
         var cmd = $"INSERT INTO {tableName} ({columnList}) VALUES ({parameterList}); SELECT last_insert_rowid() id";
         var multi = connection.QueryMultiple(cmd, entityToInsert, transaction, commandTimeout);
 
-        var id = (int) multi.Read().First().id;
+        var id = (int)multi.Read().First().id;
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
         if (!propertyInfos.Any()) return id;
 
@@ -1063,6 +1250,7 @@ public partial class SQLiteAdapter : ISqlAdapter
     }
 }
 
+#if !COREFX
 /// <summary>
 /// SIM: TODO: this does not work
 ///  This is hacked up from the Postgresql adapter and currently untested - 
@@ -1078,7 +1266,7 @@ public partial class OracleAdapter : ISqlAdapter
         object entityToInsert)
     {
         var parameters = new OracleDynamicParameters(entityToInsert);
-        string command = CreateInsertSql(tableName, columnList, parameterList, keyProperties, parameters);
+        string command = CreateInsertSql(tableName, columnList, parameterList, keyProperties, parameters, columnNameMapper);
 
         connection.Execute(command, parameters, transaction, commandTimeout: commandTimeout);
 
@@ -1102,7 +1290,7 @@ public partial class OracleAdapter : ISqlAdapter
     /// <param name="keyProperties"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    protected string CreateInsertSql(string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, OracleDynamicParameters parameters)
+    protected string CreateInsertSql(string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, OracleDynamicParameters parameters, ColumNameMapperDelegate columNameMapper)
     {
         var sb = new StringBuilder();
         sb.Append($"insert into {tableName} ({columnList}) values ({parameterList})");
@@ -1119,7 +1307,8 @@ public partial class OracleAdapter : ISqlAdapter
                 if (!first)
                     sb.Append(", ");
                 first = false;
-                sb.Append(property.Name);
+                //sb.Append(property.Name);
+                sb.Append(columNameMapper(property));
                 sb.Append(" INTO ");
 
                 string parameterName = $"newid_{property.Name}";
@@ -1157,3 +1346,4 @@ public partial class OracleAdapter : ISqlAdapter
         sb.Append(".NEXTVAL");
     }
 }
+#endif
