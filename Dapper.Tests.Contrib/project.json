@@ -102,7 +102,7 @@
         "dnxcore50"
       ],
       "buildOptions": {
-        "define": [ "COREFX", "ASYNC", "XUNIT2" ]
+        "define": [ "COREFX", "NO_ASYNC_SIM", "XUNIT2" ]
       },
       "dependencies": {
         "Microsoft.NETCore.App": {

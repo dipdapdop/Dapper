@@ -130,7 +130,7 @@
         "dnxcore50"
       ],
       "buildOptions": {
-        "define": [ "ASYNC", "COREFX", "XUNIT2", "SQLITE" ]
+        "define": [ "NO_ASYNC_SIM", "COREFX", "XUNIT2", "SQLITE" ]
       },
       "dependencies": {
         "Microsoft.NETCore.App": {
