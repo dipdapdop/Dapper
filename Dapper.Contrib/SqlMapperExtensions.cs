@@ -40,7 +40,7 @@ namespace Dapper.Contrib.Extensions
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> TypeProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ComputedProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ColumnProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
+        private static readonly ConcurrentDictionary<Tuple<RuntimeTypeHandle, RuntimeTypeHandle>, string> GetQueries = new ConcurrentDictionary<Tuple<RuntimeTypeHandle, RuntimeTypeHandle>, string>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> TypeTableName = new ConcurrentDictionary<RuntimeTypeHandle, string>();
 
         private static readonly ConcurrentDictionary<PropertyInfo, string> PropertyInfoToColumnName = new ConcurrentDictionary<PropertyInfo, string>();
@@ -210,9 +210,11 @@ namespace Dapper.Contrib.Extensions
         {
             string sql;
             Type identityType = identity?.GetType();
+            var cacheKey = new Tuple<RuntimeTypeHandle, RuntimeTypeHandle>(type.TypeHandle, identityType.TypeHandle);
 
             // Generate query
-            if (!GetQueries.TryGetValue(type.TypeHandle, out sql))
+            if (!GetQueries.TryGetValue(cacheKey, out sql))
+            //if (!GetQueries.TryGetValue(identityType.TypeHandle, out sql))
             {
                 var name = GetTableName(type);
 
@@ -263,6 +265,7 @@ namespace Dapper.Contrib.Extensions
 
                                 // isArray should be the guard clause here.
                                 // ReSharper disable once PossibleNullReferenceException
+                                // ReSharper disable once UnusedVariable
                                 foreach (dynamic ppv in paramPropertyValue)
                                 {
                                     adapter.AppendParameter(sb, parameterName + j); //implicit cast
@@ -291,7 +294,8 @@ namespace Dapper.Contrib.Extensions
                     sql = sb.ToString();
                 }
 
-                GetQueries[type.TypeHandle] = sql;
+                GetQueries[cacheKey] = sql;
+                //GetQueries[identityType.TypeHandle] = sql;
             }
 
             return sql;
@@ -421,14 +425,17 @@ namespace Dapper.Contrib.Extensions
             var type = typeof(T);
             var cacheType = typeof(List<T>);
 
+            // SIM: type.TypeHandle, placeholder for identity
+            var cacheKey = new Tuple<RuntimeTypeHandle, RuntimeTypeHandle>(cacheType.TypeHandle, type.TypeHandle);
+
             string sql;
-            if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
+            if (!GetQueries.TryGetValue(cacheKey, out sql))
             {
                 //GetSingleKey<T>(nameof(GetAll));
                 var name = GetTableName(type);
 
                 sql = "select * from " + name;
-                GetQueries[cacheType.TypeHandle] = sql;
+                GetQueries[cacheKey] = sql;
             }
 
             if (!type.IsInterface()) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
