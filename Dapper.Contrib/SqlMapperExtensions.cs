@@ -6,100 +6,79 @@ using System.Reflection;
 using System.Text;
 using System.Collections.Concurrent;
 using System.Reflection.Emit;
-using Dapper;
-using static Dapper.Contrib.Extensions.SqlMapperExtensions;
 
-#if COREFX
+using Dapper;
+
+#if NETSTANDARD1_3
 using DataException = System.InvalidOperationException;
 #else
 using System.Threading;
-using Oracle.ManagedDataAccess.Client;
 #endif
 
 namespace Dapper.Contrib.Extensions
 {
+    /// <summary>
+    /// The Dapper.Contrib extensions for Dapper
+    /// </summary>
     public static partial class SqlMapperExtensions
     {
-        // ReSharper disable once MemberCanBePrivate.Global
+        /// <summary>
+        /// Defined a proxy object with a possibly dirty state.
+        /// </summary>
         public interface IProxy //must be kept public
         {
+            /// <summary>
+            /// Whether the object has been changed.
+            /// </summary>
             bool IsDirty { get; set; }
         }
 
+        /// <summary>
+        /// Defines a table name mapper for getting table names from types.
+        /// </summary>
         public interface ITableNameMapper
         {
+            /// <summary>
+            /// Gets a table name from a given <see cref="Type"/>.
+            /// </summary>
+            /// <param name="type">The <see cref="Type"/> to get a name from.</param>
+            /// <returns>The table name for the given <paramref name="type"/>.</returns>
             string GetTableName(Type type);
         }
 
+        /// <summary>
+        /// The function to get a database type from the given <see cref="IDbConnection"/>.
+        /// </summary>
+        /// <param name="connection">The connection to get a database type name from.</param>
         public delegate string GetDatabaseTypeDelegate(IDbConnection connection);
+        /// <summary>
+        /// The function to get a a table name from a given <see cref="Type"/>
+        /// </summary>
+        /// <param name="type">The <see cref="Type"/> to get a table name for.</param>
         public delegate string TableNameMapperDelegate(Type type);
-        public delegate string ColumNameMapperDelegate(PropertyInfo propertyInfo);
 
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> KeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ExplicitKeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> TypeProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ComputedProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ColumnProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
-        private static readonly ConcurrentDictionary<Tuple<RuntimeTypeHandle, RuntimeTypeHandle>, string> GetQueries = new ConcurrentDictionary<Tuple<RuntimeTypeHandle, RuntimeTypeHandle>, string>();
+        private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> TypeTableName = new ConcurrentDictionary<RuntimeTypeHandle, string>();
-
-        private static readonly ConcurrentDictionary<PropertyInfo, string> PropertyInfoToColumnName = new ConcurrentDictionary<PropertyInfo, string>();
-
 
         private static readonly ISqlAdapter DefaultAdapter = new SqlServerAdapter();
         private static readonly Dictionary<string, ISqlAdapter> AdapterDictionary
             = new Dictionary<string, ISqlAdapter>
             {
-                {"sqlconnection", new SqlServerAdapter()},
-                {"sqlceconnection", new SqlCeServerAdapter()},
-                {"npgsqlconnection", new PostgresAdapter()},
-                {"sqliteconnection", new SQLiteAdapter()},
-                {"mysqlconnection", new MySqlAdapter()}
-#if! COREFX
-                ,{"oracleconnection", new OracleAdapter()}
-#endif
+                ["sqlconnection"] = new SqlServerAdapter(),
+                ["sqlceconnection"] = new SqlCeServerAdapter(),
+                ["npgsqlconnection"] = new PostgresAdapter(),
+                ["sqliteconnection"] = new SQLiteAdapter(),
+                ["mysqlconnection"] = new MySqlAdapter(),
+                ["fbconnection"] = new FbAdapter()
             };
-
-
-        public static ColumNameMapperDelegate ColumnNameMapper;
-        private static string PropertyInfoToColumnNameCache(PropertyInfo propertyInfo)
-        {
-            string name = null;
-
-            //var ci = propertyInfo.GetCustomAttributes(false)
-            //    .OfType<ColumnAttribute>();
-
-            if (PropertyInfoToColumnName.TryGetValue(propertyInfo, out name))
-            {
-                return name;
-            }
-            if (ColumnNameMapper == null)
-            {
-                name = propertyInfo.Name;
-            }
-            // SIM: use the column attribute as defined on the property 
-            // as an override to the 'fallback' general ColumnNameMapper strategy.
-            // (See #32 for why we need it.)
-
-
-
-            //if (hasColumnAttribute)
-            //{
-            //    name = 
-            //}
-            else
-            {
-                name = ColumnNameMapper(propertyInfo);
-            }
-            PropertyInfoToColumnName[propertyInfo] = name;
-            return name;
-        }
-
 
         private static List<PropertyInfo> ComputedPropertiesCache(Type type)
         {
-            IEnumerable<PropertyInfo> pi;
-            if (ComputedProperties.TryGetValue(type.TypeHandle, out pi))
+            if (ComputedProperties.TryGetValue(type.TypeHandle, out IEnumerable<PropertyInfo> pi))
             {
                 return pi.ToList();
             }
@@ -112,8 +91,7 @@ namespace Dapper.Contrib.Extensions
 
         private static List<PropertyInfo> ExplicitKeyPropertiesCache(Type type)
         {
-            IEnumerable<PropertyInfo> pi;
-            if (ExplicitKeyProperties.TryGetValue(type.TypeHandle, out pi))
+            if (ExplicitKeyProperties.TryGetValue(type.TypeHandle, out IEnumerable<PropertyInfo> pi))
             {
                 return pi.ToList();
             }
@@ -126,22 +104,17 @@ namespace Dapper.Contrib.Extensions
 
         private static List<PropertyInfo> KeyPropertiesCache(Type type)
         {
-
-            IEnumerable<PropertyInfo> pi;
-            if (KeyProperties.TryGetValue(type.TypeHandle, out pi))
+            if (KeyProperties.TryGetValue(type.TypeHandle, out IEnumerable<PropertyInfo> pi))
             {
                 return pi.ToList();
             }
 
             var allProperties = TypePropertiesCache(type);
-            var keyProperties = allProperties.Where(p =>
-            {
-                return p.GetCustomAttributes(true).Any(a => a is KeyAttribute);
-            }).ToList();
+            var keyProperties = allProperties.Where(p => p.GetCustomAttributes(true).Any(a => a is KeyAttribute)).ToList();
 
             if (keyProperties.Count == 0)
             {
-                var idProp = allProperties.FirstOrDefault(p => p.Name.ToLower() == "id");
+                var idProp = allProperties.Find(p => string.Equals(p.Name, "id", StringComparison.CurrentCultureIgnoreCase));
                 if (idProp != null && !idProp.GetCustomAttributes(true).Any(a => a is ExplicitKeyAttribute))
                 {
                     keyProperties.Add(idProp);
@@ -154,8 +127,7 @@ namespace Dapper.Contrib.Extensions
 
         private static List<PropertyInfo> TypePropertiesCache(Type type)
         {
-            IEnumerable<PropertyInfo> pis;
-            if (TypeProperties.TryGetValue(type.TypeHandle, out pis))
+            if (TypeProperties.TryGetValue(type.TypeHandle, out IEnumerable<PropertyInfo> pis))
             {
                 return pis.ToList();
             }
@@ -163,25 +135,6 @@ namespace Dapper.Contrib.Extensions
             var properties = type.GetProperties().Where(IsWriteable).ToArray();
             TypeProperties[type.TypeHandle] = properties;
             return properties.ToList();
-        }
-
-        /// <summary>
-        /// Added SIM:
-        /// </summary>
-        /// <param name="type"></param>
-        /// <returns></returns>
-        private static List<PropertyInfo> ColumnPropertiesCache(Type type)
-        {
-            IEnumerable<PropertyInfo> pi;
-            if (ColumnProperties.TryGetValue(type.TypeHandle, out pi))
-            {
-                return pi.ToList();
-            }
-
-            var columnPropertiesCache = TypePropertiesCache(type).Where(p => p.GetCustomAttributes(true).Any(a => a is ColumnAttribute)).ToList();
-
-            ColumnProperties[type.TypeHandle] = columnPropertiesCache;
-            return columnPropertiesCache;
         }
 
         private static bool IsWriteable(PropertyInfo pi)
@@ -193,195 +146,47 @@ namespace Dapper.Contrib.Extensions
             return writeAttribute.Write;
         }
 
-        private static List<PropertyInfo> GetAllKeys(Type type)
+        private static PropertyInfo GetSingleKey<T>(string method)
         {
-            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
-            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
+            var type = typeof(T);
+            var keys = KeyPropertiesCache(type);
+            var explicitKeys = ExplicitKeyPropertiesCache(type);
+            var keyCount = keys.Count + explicitKeys.Count;
+            if (keyCount > 1)
+                throw new DataException($"{method}<T> only supports an entity with a single [Key] or [ExplicitKey] property");
+            if (keyCount == 0)
+                throw new DataException($"{method}<T> only supports an entity with a [Key] or an [ExplicitKey] property");
 
-            keyProperties.AddRange(explicitKeyProperties);
-
-            if (!keyProperties.Any())
-                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
-
-            return keyProperties;
-        }
-
-        private static string GenerateGetQuery(IDbConnection connection, Type type, dynamic identity, List<PropertyInfo> keyProperties)
-        {
-            string sql;
-            Type identityType = identity?.GetType();
-            var cacheKey = new Tuple<RuntimeTypeHandle, RuntimeTypeHandle>(type.TypeHandle, identityType.TypeHandle);
-
-            // Generate query
-            if (!GetQueries.TryGetValue(cacheKey, out sql))
-            //if (!GetQueries.TryGetValue(identityType.TypeHandle, out sql))
-            {
-                var name = GetTableName(type);
-
-                if (keyProperties.Count == 1)
-                {
-                    var key = keyProperties.First();
-                    sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
-                }
-                else
-                {
-                    var sb = new StringBuilder();
-                    sb.Append($"select * from {name} where ");
-
-                    var adapter = GetFormatter(connection);
-
-                    for (var i = 0; i < keyProperties.Count; i++)
-                    {
-
-                        // SIM: HACK: AppendColumnNameEqualsValue takes a string not a PropertyInfo type.
-                        //adapter.AppendColumnNameEqualsValue(sb, property.Name);  //fix for issue #336 (dapper)
-                        {
-
-                            var isParamSameType = identityType == type;
-                            var keyTypeProperties = isParamSameType ? null : identityType.GetProperties();
-
-                            var property = keyProperties.ElementAt(i);
-                            var parameterName = property.Name;
-
-                            // if key object passed is the same type as expected result, use property
-                            var paramProperty = isParamSameType ? property :
-                                keyTypeProperties.FirstOrDefault(
-                                    p => p.Name.Equals(property.Name, StringComparison.CurrentCultureIgnoreCase)
-                                );
-
-                            dynamic paramPropertyValue = paramProperty?.GetValue(identity, null);
-                            bool isArray = paramPropertyValue?.GetType().IsArray ?? default(bool);
-
-                            sb.Append("(");
-                            adapter.AppendColumnName(sb, PropertyInfoToColumnNameCache(property));
-
-                            // #20 LGH/lgh-dapper-api
-                            sb.Append(isArray ? " in " : " = "); // isParamSameType may be enough
-
-                            if (isArray)
-                            {
-                                sb.Append("(");
-                                var j = 1;
-
-                                // isArray should be the guard clause here.
-                                // ReSharper disable once PossibleNullReferenceException
-                                // ReSharper disable once UnusedVariable
-                                foreach (dynamic ppv in paramPropertyValue)
-                                {
-                                    adapter.AppendParameter(sb, parameterName + j); //implicit cast
-                                    if (j < paramPropertyValue.Length)
-                                        sb.Append(", ");
-                                    j++;
-                                }
-                                // SIM: we don't need the null test in here.
-                                sb.Append(")");
-                                sb.Append(")");
-                            }
-                            else
-                            {
-                                adapter.AppendParameter(sb, parameterName);
-                                sb.Append(" or ");
-                                adapter.AppendParameter(sb, parameterName);
-                                sb.Append(" is null");
-                                sb.Append(")");
-                            }
-                        }
-
-                        if (i < keyProperties.Count - 1)
-                            sb.AppendFormat(" and ");
-                    }
-
-                    sql = sb.ToString();
-                }
-
-                GetQueries[cacheKey] = sql;
-                //GetQueries[identityType.TypeHandle] = sql;
-            }
-
-            return sql;
-        }
-
-        private static DynamicParameters GenerateGetParams(Type type, dynamic identity, List<PropertyInfo> keyProperties)
-        {
-
-            var dynParms = new DynamicParameters();
-            Type identityType = identity?.GetType();
-
-            if (keyProperties.Count == 1 && (identityType == null || identityType.IsValueType()))
-            {
-                dynParms.Add($":{keyProperties.First().Name}", identity);
-            }
-            else
-            {
-                if (identityType == null || identityType.IsValueType())
-                    throw new ArgumentException($"The key object passed cannot be null or value type for composite key in {type.Name}");
-
-                var isParamSameType = identityType == type;
-                var keyTypeProperties = isParamSameType ? null : identityType.GetProperties();
-
-                for (var i = 0; i < keyProperties.Count; i++)
-                {
-                    var property = keyProperties.ElementAt(i);
-
-                    // if key object passed is the same type as expected result, use property
-                    var paramProperty = isParamSameType ? property :
-                        keyTypeProperties.FirstOrDefault(
-                            p => p.Name.Equals(property.Name, StringComparison.CurrentCultureIgnoreCase)
-                        );
-
-                    dynamic paramPropertyValue = paramProperty?.GetValue(identity, null);
-                    bool isArray = paramPropertyValue?.GetType().IsArray ?? default(bool);
-
-                    // SIM: not sure that this is necessary or desirable - we test against null in generated sql
-                    // as is the house style.
-                    //if (paramProperty == null)
-                    //    throw new ArgumentException($"The key object passed does not contain {property.Name} property.");
-
-                    // SIM: now test for null here using conditional access, will pass in null to dynParms list
-                    // (if null reference) which is the desired behaviour.
-                    //dynParms.Add($":{property.Name}", paramProperty.GetValue(identity, null));
-
-                    if (isArray)
-                    {
-                        var j = 1;
-                        // isArray should be the guard clause here.
-                        // ReSharper disable once PossibleNullReferenceException
-                        foreach (dynamic ppv in paramPropertyValue)
-                        {
-                            dynParms.Add($":{property.Name}{j}", ppv);
-                            j++;
-                        }
-                    }
-                    else
-                    {
-                        dynParms.Add($":{property.Name}", paramProperty?.GetValue(identity, null));
-                    }
-                }
-            }
-
-            return dynParms;
+            return keys.Count > 0 ? keys[0] : explicitKeys[0];
         }
 
         /// <summary>
-        /// Returns a single entity by a key from table "Ts".  
-        /// Keys must be marked with [Key] or [ExplicitKey] attributes.
+        /// Returns a single entity by a single id from table "Ts".  
+        /// Id must be marked with [Key] attribute.
         /// Entities created from interfaces are tracked/intercepted for changes and used by the Update() extension
         /// for optimal performance. 
         /// </summary>
         /// <typeparam name="T">Interface or type to create and populate</typeparam>
         /// <param name="connection">Open SqlConnection</param>
-        ///<param name="identity">Single or composite Key object that represents the entity to get</param>
+        /// <param name="id">Id of the entity to get, must be marked with [Key] attribute</param>
         /// <param name="transaction">The transaction to run under, null (the default) if none</param>
         /// <param name="commandTimeout">Number of seconds before command execution timeout</param>
         /// <returns>Entity of T</returns>
-        public static T Get<T>(this IDbConnection connection, dynamic identity, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        public static T Get<T>(this IDbConnection connection, dynamic id, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
         {
             var type = typeof(T);
 
-            List<PropertyInfo> keyProperties = GetAllKeys(type);
+            if (!GetQueries.TryGetValue(type.TypeHandle, out string sql))
+            {
+                var key = GetSingleKey<T>(nameof(Get));
+                var name = GetTableName(type);
 
-            var sql = GenerateGetQuery(connection, type, (object)identity, keyProperties);
-            DynamicParameters dynParms = GenerateGetParams(type, identity, keyProperties);
+                sql = $"select * from {name} where {key.Name} = @id";
+                GetQueries[type.TypeHandle] = sql;
+            }
+
+            var dynParms = new DynamicParameters();
+            dynParms.Add("@id", id);
 
             T obj;
 
@@ -396,7 +201,7 @@ namespace Dapper.Contrib.Extensions
 
                 foreach (var property in TypePropertiesCache(type))
                 {
-                    var val = res[PropertyInfoToColumnNameCache(property)];
+                    var val = res[property.Name];
                     property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
                 }
 
@@ -425,17 +230,13 @@ namespace Dapper.Contrib.Extensions
             var type = typeof(T);
             var cacheType = typeof(List<T>);
 
-            // SIM: type.TypeHandle, placeholder for identity
-            var cacheKey = new Tuple<RuntimeTypeHandle, RuntimeTypeHandle>(cacheType.TypeHandle, type.TypeHandle);
-
-            string sql;
-            if (!GetQueries.TryGetValue(cacheKey, out sql))
+            if (!GetQueries.TryGetValue(cacheType.TypeHandle, out string sql))
             {
-                //GetSingleKey<T>(nameof(GetAll));
+                GetSingleKey<T>(nameof(GetAll));
                 var name = GetTableName(type);
 
                 sql = "select * from " + name;
-                GetQueries[cacheKey] = sql;
+                GetQueries[cacheType.TypeHandle] = sql;
             }
 
             if (!type.IsInterface()) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
@@ -447,100 +248,13 @@ namespace Dapper.Contrib.Extensions
                 var obj = ProxyGenerator.GetInterfaceProxy<T>();
                 foreach (var property in TypePropertiesCache(type))
                 {
-                    var val = res[PropertyInfoToColumnNameCache(property)];
+                    var val = res[property.Name];
                     property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
                 }
                 ((IProxy)obj).IsDirty = false;   //reset change tracking and return
                 list.Add(obj);
             }
             return list;
-
-        }
-
-        /*
-                public static IEnumerable<T> Query<T>(this IDbConnection connection, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
-                {
-                    var type = typeof(T);
-                    var cacheType = typeof(List<T>);
-
-                    string sql;
-                    if (!GetQueries.TryGetValue(cacheType.TypeHandle, out sql))
-                    {
-                        var key = GetSingleKey<T>(nameof(Query));
-                        var name = GetTableName(type);
-
-                        //sql = "select * from " + name;
-                        sql = $"select * from {name} where {PropertyInfoToColumnNameCache(key)} = :{key.Name}";
-                        GetQueries[cacheType.TypeHandle] = sql;
-                    }
-
-                    if (!type.IsInterface) return connection.Query<T>(sql, null, transaction, commandTimeout: commandTimeout);
-
-                    var result = connection.Query(sql);
-                    var list = new List<T>();
-                    foreach (IDictionary<string, object> res in result)
-                    {
-                        var obj = ProxyGenerator.GetInterfaceProxy<T>();
-                        foreach (var property in TypePropertiesCache(type))
-                        {
-                            var val = res[PropertyInfoToColumnNameCache(property)];
-                            property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
-                        }
-                        ((IProxy)obj).IsDirty = false;   //reset change tracking and return
-                        list.Add(obj);
-                    }
-                    return list;
-
-                }
-        */
-
-        /// <summary>
-        /// Returns a list of entites from table "Ts".  
-        /// Id of T must be marked with [Key] attribute.
-        /// Entities created from interfaces are tracked/intercepted for changes and used by the Update() extension
-        /// for optimal performance. 
-        /// </summary>
-        /// <typeparam name="T">Interface or type to create and populate</typeparam>
-        /// <param name="connection">Open SqlConnection</param>
-        /// <param name="identity"></param>
-        /// <param name="transaction">The transaction to run under, null (the default) if none</param>
-        /// <param name="commandTimeout">Number of seconds before command execution timeout</param>
-        /// <returns>Entity of T</returns>
-        public static IEnumerable<T> GetList<T>(this IDbConnection connection, dynamic /*id*/ identity, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
-        {
-            var type = typeof(T);
-            List<PropertyInfo> keyProperties = GetAllKeys(type);
-            // SIM: NB: do not change this to 'var' or else connection.Query call will complain
-            // about dynamic dispatch.
-            string sql = GenerateGetQuery(connection, type, identity, keyProperties);
-            DynamicParameters dynParms = GenerateGetParams(type, identity, keyProperties);
-
-            var list = new List<T>();
-            if (type.IsInterface())
-            {
-                // SIM: this call: 
-                var res = connection.Query(sql, dynParms).FirstOrDefault() as IDictionary<string, object>;
-
-                if (res == null)
-                    return null;
-
-                var obj = ProxyGenerator.GetInterfaceProxy<T>();
-
-                foreach (var property in TypePropertiesCache(type))
-                {
-                    var val = res[PropertyInfoToColumnNameCache(property)];
-                    property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
-                }
-
-                ((IProxy)obj).IsDirty = false;   //reset change tracking and return
-                list.Add(obj);
-            }
-            else
-            {
-                list = connection.Query<T>(sql, dynParms, transaction, commandTimeout: commandTimeout).ToList();
-            }
-            return list;
-
         }
 
         /// <summary>
@@ -550,8 +264,7 @@ namespace Dapper.Contrib.Extensions
 
         private static string GetTableName(Type type)
         {
-            string name;
-            if (TypeTableName.TryGetValue(type.TypeHandle, out name)) return name;
+            if (TypeTableName.TryGetValue(type.TypeHandle, out string name)) return name;
 
             if (TableNameMapper != null)
             {
@@ -559,14 +272,16 @@ namespace Dapper.Contrib.Extensions
             }
             else
             {
-                //NOTE: This 'as dynamic' trick should be able to handle both our own Table-attribute as well as the one in EntityFramework 
+                //NOTE: This as dynamic trick should be able to handle both our own Table-attribute as well as the one in EntityFramework 
                 var tableAttr = type
-#if COREFX
+#if NETSTANDARD1_3
                     .GetTypeInfo()
 #endif
                     .GetCustomAttributes(false).SingleOrDefault(attr => attr.GetType().Name == "TableAttribute") as dynamic;
                 if (tableAttr != null)
+                {
                     name = tableAttr.Name;
+                }
                 else
                 {
                     name = type.Name + "s";
@@ -579,10 +294,10 @@ namespace Dapper.Contrib.Extensions
             return name;
         }
 
-
         /// <summary>
-        /// Inserts an entity into table "Ts" and returns identity id or number if inserted rows if inserting a list.
+        /// Inserts an entity into table "Ts" and returns identity id or number of inserted rows if inserting a list.
         /// </summary>
+        /// <typeparam name="T">The type to insert.</typeparam>
         /// <param name="connection">Open SqlConnection</param>
         /// <param name="entityToInsert">Entity to insert, can be list of entities</param>
         /// <param name="transaction">The transaction to run under, null (the default) if none</param>
@@ -599,7 +314,7 @@ namespace Dapper.Contrib.Extensions
                 isList = true;
                 type = type.GetElementType();
             }
-            else if (type.IsGenericType())
+            else if (type.IsGenericType() && type.GetTypeInfo().ImplementedInterfaces.Any(ti => ti.IsGenericType() && ti.GetGenericTypeDefinition() == typeof(IEnumerable<>)))
             {
                 isList = true;
                 type = type.GetGenericArguments()[0];
@@ -610,15 +325,14 @@ namespace Dapper.Contrib.Extensions
             var allProperties = TypePropertiesCache(type);
             var keyProperties = KeyPropertiesCache(type);
             var computedProperties = ComputedPropertiesCache(type);
-            var columnProperties = ColumnPropertiesCache(type); //TODO: 
             var allPropertiesExceptKeyAndComputed = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
 
             var adapter = GetFormatter(connection);
 
             for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
-                adapter.AppendColumnName(sbColumnList, PropertyInfoToColumnNameCache(property));  //fix for issue #336
+                var property = allPropertiesExceptKeyAndComputed[i];
+                adapter.AppendColumnName(sbColumnList, property.Name);  //fix for issue #336
                 if (i < allPropertiesExceptKeyAndComputed.Count - 1)
                     sbColumnList.Append(", ");
             }
@@ -626,9 +340,8 @@ namespace Dapper.Contrib.Extensions
             var sbParameterList = new StringBuilder(null);
             for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
-                //sbParameterList.Append($"@{property.Name}");
-                sbParameterList.Append($":{property.Name}");
+                var property = allPropertiesExceptKeyAndComputed[i];
+                sbParameterList.AppendFormat("@{0}", property.Name);
                 if (i < allPropertiesExceptKeyAndComputed.Count - 1)
                     sbParameterList.Append(", ");
             }
@@ -640,7 +353,7 @@ namespace Dapper.Contrib.Extensions
             if (!isList)    //single entity
             {
                 returnVal = adapter.Insert(connection, transaction, commandTimeout, name, sbColumnList.ToString(),
-                    sbParameterList.ToString(), keyProperties, ColumnNameMapper, entityToInsert);
+                    sbParameterList.ToString(), keyProperties, entityToInsert);
             }
             else
             {
@@ -663,10 +376,9 @@ namespace Dapper.Contrib.Extensions
         /// <returns>true if updated, false if not found or not modified (tracked entities)</returns>
         public static bool Update<T>(this IDbConnection connection, T entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
         {
-            var proxy = entityToUpdate as IProxy;
-            if (proxy != null)
+            if (entityToUpdate is IProxy proxy && !proxy.IsDirty)
             {
-                if (!proxy.IsDirty) return false;
+                return false;
             }
 
             var type = typeof(T);
@@ -680,20 +392,18 @@ namespace Dapper.Contrib.Extensions
                 type = type.GetGenericArguments()[0];
             }
 
-            //var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
-            //var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
-            //if (!keyProperties.Any() && !explicitKeyProperties.Any())
-            //    throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
-
-            var keyProperties = GetAllKeys(type);
+            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
+            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
+            if (keyProperties.Count == 0 && explicitKeyProperties.Count == 0)
+                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
 
             var name = GetTableName(type);
 
             var sb = new StringBuilder();
-            sb.Append($"update {name} set ");
+            sb.AppendFormat("update {0} set ", name);
 
             var allProperties = TypePropertiesCache(type);
-            //keyProperties.AddRange(explicitKeyProperties);
+            keyProperties.AddRange(explicitKeyProperties);
             var computedProperties = ComputedPropertiesCache(type);
             var nonIdProps = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
 
@@ -701,16 +411,16 @@ namespace Dapper.Contrib.Extensions
 
             for (var i = 0; i < nonIdProps.Count; i++)
             {
-                var property = nonIdProps.ElementAt(i);
-                adapter.AppendColumnNameEqualsValue(sb, PropertyInfoToColumnNameCache(property));  //fix for issue #336
+                var property = nonIdProps[i];
+                adapter.AppendColumnNameEqualsValue(sb, property.Name);  //fix for issue #336
                 if (i < nonIdProps.Count - 1)
                     sb.AppendFormat(", ");
             }
             sb.Append(" where ");
             for (var i = 0; i < keyProperties.Count; i++)
             {
-                var property = keyProperties.ElementAt(i);
-                adapter.AppendColumnNameEqualsValue(sb, PropertyInfoToColumnNameCache(property));  //fix for issue #336
+                var property = keyProperties[i];
+                adapter.AppendColumnNameEqualsValue(sb, property.Name);  //fix for issue #336
                 if (i < keyProperties.Count - 1)
                     sb.AppendFormat(" and ");
             }
@@ -743,19 +453,23 @@ namespace Dapper.Contrib.Extensions
                 type = type.GetGenericArguments()[0];
             }
 
-            var keyProperties = GetAllKeys(type);
+            var keyProperties = KeyPropertiesCache(type).ToList();  //added ToList() due to issue #418, must work on a list copy
+            var explicitKeyProperties = ExplicitKeyPropertiesCache(type);
+            if (keyProperties.Count == 0 && explicitKeyProperties.Count == 0)
+                throw new ArgumentException("Entity must have at least one [Key] or [ExplicitKey] property");
 
             var name = GetTableName(type);
+            keyProperties.AddRange(explicitKeyProperties);
 
             var sb = new StringBuilder();
-            sb.Append($"delete from {name} where ");
+            sb.AppendFormat("delete from {0} where ", name);
 
             var adapter = GetFormatter(connection);
 
             for (var i = 0; i < keyProperties.Count; i++)
             {
-                var property = keyProperties.ElementAt(i);
-                adapter.AppendColumnNameEqualsValue(sb, PropertyInfoToColumnNameCache(property));  //fix for issue #336
+                var property = keyProperties[i];
+                adapter.AppendColumnNameEqualsValue(sb, property.Name);  //fix for issue #336
                 if (i < keyProperties.Count - 1)
                     sb.AppendFormat(" and ");
             }
@@ -796,13 +510,13 @@ namespace Dapper.Contrib.Extensions
                 : AdapterDictionary[name];
         }
 
-        static class ProxyGenerator
+        private static class ProxyGenerator
         {
             private static readonly Dictionary<Type, Type> TypeCache = new Dictionary<Type, Type>();
 
             private static AssemblyBuilder GetAsmBuilder(string name)
             {
-#if COREFX
+#if NETSTANDARD1_3 || NETSTANDARD2_0
                 return AssemblyBuilder.DefineDynamicAssembly(new AssemblyName { Name = name }, AssemblyBuilderAccess.Run);
 #else
                 return Thread.GetDomain().DefineDynamicAssembly(new AssemblyName { Name = name }, AssemblyBuilderAccess.Run);
@@ -813,8 +527,7 @@ namespace Dapper.Contrib.Extensions
             {
                 Type typeOfT = typeof(T);
 
-                Type k;
-                if (TypeCache.TryGetValue(typeOfT, out k))
+                if (TypeCache.TryGetValue(typeOfT, out Type k))
                 {
                     return (T)Activator.CreateInstance(k);
                 }
@@ -838,7 +551,7 @@ namespace Dapper.Contrib.Extensions
                     CreateProperty<T>(typeBuilder, property.Name, property.PropertyType, setIsDirtyMethod, isId);
                 }
 
-#if COREFX
+#if NETSTANDARD1_3 || NETSTANDARD2_0
                 var generatedType = typeBuilder.CreateTypeInfo().AsType();
 #else
                 var generatedType = typeBuilder.CreateType();
@@ -848,21 +561,20 @@ namespace Dapper.Contrib.Extensions
                 return (T)Activator.CreateInstance(generatedType);
             }
 
-
             private static MethodInfo CreateIsDirtyProperty(TypeBuilder typeBuilder)
             {
                 var propType = typeof(bool);
-                var field = typeBuilder.DefineField("_" + "IsDirty", propType, FieldAttributes.Private);
-                var property = typeBuilder.DefineProperty("IsDirty",
+                var field = typeBuilder.DefineField("_" + nameof(IProxy.IsDirty), propType, FieldAttributes.Private);
+                var property = typeBuilder.DefineProperty(nameof(IProxy.IsDirty),
                                                System.Reflection.PropertyAttributes.None,
                                                propType,
                                                new[] { propType });
 
-                const MethodAttributes getSetAttr = MethodAttributes.Public | MethodAttributes.NewSlot | MethodAttributes.SpecialName |
-                                                    MethodAttributes.Final | MethodAttributes.Virtual | MethodAttributes.HideBySig;
+                const MethodAttributes getSetAttr = MethodAttributes.Public | MethodAttributes.NewSlot | MethodAttributes.SpecialName
+                                                  | MethodAttributes.Final | MethodAttributes.Virtual | MethodAttributes.HideBySig;
 
                 // Define the "get" and "set" accessor methods
-                var currGetPropMthdBldr = typeBuilder.DefineMethod("get_" + "IsDirty",
+                var currGetPropMthdBldr = typeBuilder.DefineMethod("get_" + nameof(IProxy.IsDirty),
                                              getSetAttr,
                                              propType,
                                              Type.EmptyTypes);
@@ -870,7 +582,7 @@ namespace Dapper.Contrib.Extensions
                 currGetIl.Emit(OpCodes.Ldarg_0);
                 currGetIl.Emit(OpCodes.Ldfld, field);
                 currGetIl.Emit(OpCodes.Ret);
-                var currSetPropMthdBldr = typeBuilder.DefineMethod("set_" + "IsDirty",
+                var currSetPropMthdBldr = typeBuilder.DefineMethod("set_" + nameof(IProxy.IsDirty),
                                              getSetAttr,
                                              null,
                                              new[] { propType });
@@ -882,8 +594,8 @@ namespace Dapper.Contrib.Extensions
 
                 property.SetGetMethod(currGetPropMthdBldr);
                 property.SetSetMethod(currSetPropMthdBldr);
-                var getMethod = typeof(IProxy).GetMethod("get_" + "IsDirty");
-                var setMethod = typeof(IProxy).GetMethod("set_" + "IsDirty");
+                var getMethod = typeof(IProxy).GetMethod("get_" + nameof(IProxy.IsDirty));
+                var setMethod = typeof(IProxy).GetMethod("set_" + nameof(IProxy.IsDirty));
                 typeBuilder.DefineMethodOverride(currGetPropMthdBldr, getMethod);
                 typeBuilder.DefineMethodOverride(currSetPropMthdBldr, setMethod);
 
@@ -899,8 +611,9 @@ namespace Dapper.Contrib.Extensions
                                                propType,
                                                new[] { propType });
 
-                const MethodAttributes getSetAttr = MethodAttributes.Public | MethodAttributes.Virtual |
-                                                    MethodAttributes.HideBySig;
+                const MethodAttributes getSetAttr = MethodAttributes.Public
+                                                    | MethodAttributes.Virtual
+                                                    | MethodAttributes.HideBySig;
 
                 // Define the "get" and "set" accessor methods
                 var currGetPropMthdBldr = typeBuilder.DefineMethod("get_" + propertyName,
@@ -947,169 +660,237 @@ namespace Dapper.Contrib.Extensions
         }
     }
 
+    /// <summary>
+    /// Defines the name of a table to use in Dapper.Contrib commands.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Class)]
     public class TableAttribute : Attribute
     {
+        /// <summary>
+        /// Creates a table mapping to a specific name for Dapper.Contrib commands
+        /// </summary>
+        /// <param name="tableName">The name of this table in the database.</param>
         public TableAttribute(string tableName)
         {
             Name = tableName;
         }
 
-        // ReSharper disable once MemberCanBePrivate.Global
-        // ReSharper disable once UnusedAutoPropertyAccessor.Global
+        /// <summary>
+        /// The name of the table in the database
+        /// </summary>
         public string Name { get; set; }
     }
 
-    [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
-    public class ColumnAttribute : Attribute
-    {
-        public ColumnAttribute(string name)
-        {
-            Name = name;
-        }
-
-        // ReSharper disable once MemberCanBePrivate.Global
-        // ReSharper disable once UnusedAutoPropertyAccessor.Global
-        public string Name { get; set; }
-    }
-
-    // do not want to depend on data annotations that is not in client profile
+    /// <summary>
+    /// Specifies that this field is a primary key in the database
+    /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
     public class KeyAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Specifies that this field is a explicitly set primary key in the database
+    /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
     public class ExplicitKeyAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Specifies whether a field is writable in the database.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
     public class WriteAttribute : Attribute
     {
+        /// <summary>
+        /// Specifies whether a field is writable in the database.
+        /// </summary>
+        /// <param name="write">Whether a field is writable in the database.</param>
         public WriteAttribute(bool write)
         {
             Write = write;
         }
+
+        /// <summary>
+        /// Whether a field is writable in the database.
+        /// </summary>
         public bool Write { get; }
     }
 
+    /// <summary>
+    /// Specifies that this is a computed column.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
     public class ComputedAttribute : Attribute
     {
     }
 }
 
+/// <summary>
+/// The interface for all Dapper.Contrib database operations
+/// Implementing this is each provider's model.
+/// </summary>
 public partial interface ISqlAdapter
 {
-    bool SequenceSupported { get; }
-    int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert);
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert);
 
-    //new methods for issue #336
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     void AppendColumnName(StringBuilder sb, string columnName);
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     void AppendColumnNameEqualsValue(StringBuilder sb, string columnName);
-    void AppendParameter(StringBuilder sb, string columnName);
-    void AppendSequenceNextValue(StringBuilder sb, string sequenceName);
 }
 
+/// <summary>
+/// The SQL Server database adapter.
+/// </summary>
 public partial class SqlServerAdapter : ISqlAdapter
 {
-
-    public bool SequenceSupported => true;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert)
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
     {
-        var cmd = $"INSERT INTO {tableName} ({columnList}) VALUES ({parameterList});SELECT SCOPE_IDENTITY() [id]";
+        var cmd = $"insert into {tableName} ({columnList}) values ({parameterList});select SCOPE_IDENTITY() id";
         var multi = connection.QueryMultiple(cmd, entityToInsert, transaction, commandTimeout);
 
         var first = multi.Read().FirstOrDefault();
-        if (first == null || first?.id == null) return 0;
+        if (first == null || first.id == null) return 0;
 
-        // ReSharper disable once PossibleNullReferenceException
         var id = (int)first.id;
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
-        if (!propertyInfos.Any()) return id;
+        if (propertyInfos.Length == 0) return id;
 
-        var idProperty = propertyInfos.First();
+        var idProperty = propertyInfos[0];
         idProperty.SetValue(entityToInsert, Convert.ChangeType(id, idProperty.PropertyType), null);
 
         return id;
     }
 
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnName(StringBuilder sb, string columnName)
     {
-        sb.Append($"[{columnName}]");
+        sb.AppendFormat("[{0}]", columnName);
     }
 
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
     {
-        sb.Append($"[{columnName}] = @{columnName}");
-    }
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($"@{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        // https://msdn.microsoft.com/en-us/library/ff878370.aspx
-        sb.Append("NEXT VALUE FOR ");
-        sb.Append(sequenceName);
+        sb.AppendFormat("[{0}] = @{1}", columnName, columnName);
     }
 }
 
+/// <summary>
+/// The SQL Server Compact Edition database adapter.
+/// </summary>
 public partial class SqlCeServerAdapter : ISqlAdapter
 {
-    public bool SequenceSupported => false;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert)
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
     {
         var cmd = $"insert into {tableName} ({columnList}) values ({parameterList})";
         connection.Execute(cmd, entityToInsert, transaction, commandTimeout);
         var r = connection.Query("select @@IDENTITY id", transaction: transaction, commandTimeout: commandTimeout).ToList();
 
-        if (r.First().id == null) return 0;
-        var id = (int)r.First().id;
+        if (r[0].id == null) return 0;
+        var id = (int)r[0].id;
 
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
-        if (!propertyInfos.Any()) return id;
+        if (propertyInfos.Length == 0) return id;
 
-        var idProperty = propertyInfos.First();
+        var idProperty = propertyInfos[0];
         idProperty.SetValue(entityToInsert, Convert.ChangeType(id, idProperty.PropertyType), null);
 
         return id;
     }
 
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnName(StringBuilder sb, string columnName)
     {
-        sb.Append($"[{columnName}]");
+        sb.AppendFormat("[{0}]", columnName);
     }
 
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
     {
-        AppendColumnName(sb, columnName);
-        sb.Append(" = ");
-        AppendParameter(sb, columnName);
-    }
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($"@{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        throw new NotSupportedException("SQL CE does not support sequences");
+        sb.AppendFormat("[{0}] = @{1}", columnName, columnName);
     }
 }
 
+/// <summary>
+/// The MySQL database adapter.
+/// </summary>
 public partial class MySqlAdapter : ISqlAdapter
 {
-
-    public bool SequenceSupported => false;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert)
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
     {
         var cmd = $"insert into {tableName} ({columnList}) values ({parameterList})";
         connection.Execute(cmd, entityToInsert, transaction, commandTimeout);
@@ -1118,52 +899,63 @@ public partial class MySqlAdapter : ISqlAdapter
         var id = r.First().id;
         if (id == null) return 0;
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
-        if (!propertyInfos.Any()) return Convert.ToInt32(id);
+        if (propertyInfos.Length == 0) return Convert.ToInt32(id);
 
-        var idp = propertyInfos.First();
+        var idp = propertyInfos[0];
         idp.SetValue(entityToInsert, Convert.ChangeType(id, idp.PropertyType), null);
 
         return Convert.ToInt32(id);
     }
 
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnName(StringBuilder sb, string columnName)
     {
-        sb.Append($"`{columnName}`");
+        sb.AppendFormat("`{0}`", columnName);
     }
 
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
     {
-        AppendColumnName(sb, columnName);
-        sb.Append(" = ");
-        AppendParameter(sb, columnName);
-    }
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($"@{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        throw new NotSupportedException("MySql does not support sequences");
+        sb.AppendFormat("`{0}` = @{1}", columnName, columnName);
     }
 }
 
-
+/// <summary>
+/// The Postgres database adapter.
+/// </summary>
 public partial class PostgresAdapter : ISqlAdapter
 {
-
-    public bool SequenceSupported => true;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper, object entityToInsert)
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
     {
         var sb = new StringBuilder();
-        sb.Append($"insert into {tableName} ({columnList}) values ({parameterList})");
+        sb.AppendFormat("insert into {0} ({1}) values ({2})", tableName, columnList, parameterList);
 
         // If no primary key then safe to assume a join table with not too much data to return
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
-        if (!propertyInfos.Any())
+        if (propertyInfos.Length == 0)
+        {
             sb.Append(" RETURNING *");
+        }
         else
         {
             sb.Append(" RETURNING ");
@@ -1173,17 +965,17 @@ public partial class PostgresAdapter : ISqlAdapter
                 if (!first)
                     sb.Append(", ");
                 first = false;
-                sb.Append($"\"{columnNameMapper(property)}\"");
+                sb.Append(property.Name);
             }
         }
 
         var results = connection.Query(sb.ToString(), entityToInsert, transaction, commandTimeout: commandTimeout).ToList();
 
-        // Return the key by assigning the corresponding property in the object - by product is that it supports compound primary keys
+        // Return the key by assinging the corresponding property in the object - by product is that it supports compound primary keys
         var id = 0;
         foreach (var p in propertyInfos)
         {
-            var value = ((IDictionary<string, object>)results.First())[columnNameMapper(p)];
+            var value = ((IDictionary<string, object>)results[0])[p.Name.ToLower()];
             p.SetValue(entityToInsert, value, null);
             if (id == 0)
                 id = Convert.ToInt32(value);
@@ -1191,166 +983,133 @@ public partial class PostgresAdapter : ISqlAdapter
         return id;
     }
 
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnName(StringBuilder sb, string columnName)
     {
-        sb.Append($"\"{columnName}\"");
+        sb.AppendFormat("\"{0}\"", columnName);
     }
 
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
     {
-        AppendColumnName(sb, columnName);
-        sb.Append(" = ");
-        AppendParameter(sb, columnName);
-    }
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($"@{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        // http://www.postgresql.org/docs/current/static/sql-createsequence.html
-        sb.Append($"nextval('{sequenceName}')");
+        sb.AppendFormat("\"{0}\" = @{1}", columnName, columnName);
     }
 }
 
+/// <summary>
+/// The SQLite database adapter.
+/// </summary>
 public partial class SQLiteAdapter : ISqlAdapter
 {
-    public bool SequenceSupported => false;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName,
-        string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties,
-        ColumNameMapperDelegate columnNameMapper, object entityToInsert)
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
     {
         var cmd = $"INSERT INTO {tableName} ({columnList}) VALUES ({parameterList}); SELECT last_insert_rowid() id";
         var multi = connection.QueryMultiple(cmd, entityToInsert, transaction, commandTimeout);
 
         var id = (int)multi.Read().First().id;
         var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
-        if (!propertyInfos.Any()) return id;
+        if (propertyInfos.Length == 0) return id;
 
-        var idProperty = propertyInfos.First();
+        var idProperty = propertyInfos[0];
         idProperty.SetValue(entityToInsert, Convert.ChangeType(id, idProperty.PropertyType), null);
 
         return id;
     }
 
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnName(StringBuilder sb, string columnName)
     {
-        sb.Append($"\"{columnName}\"");
-    }
-
-    public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
-    {
-        sb.Append($"\"{columnName}\" = @{columnName}");
-    }
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($"@{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        throw new NotSupportedException("MySql does not support sequences");
-    }
-}
-
-#if !COREFX
-/// <summary>
-/// SIM: TODO: this does not work
-///  This is hacked up from the Postgresql adapter and currently untested - 
-///  in any case, probably YAGNI for now.
-/// </summary>
-public partial class OracleAdapter : ISqlAdapter
-{
-
-    public bool SequenceSupported => true;
-
-    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName,
-        string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, ColumNameMapperDelegate columnNameMapper,
-        object entityToInsert)
-    {
-        var parameters = new OracleDynamicParameters(entityToInsert);
-        string command = CreateInsertSql(tableName, columnList, parameterList, keyProperties, parameters, columnNameMapper);
-
-        connection.Execute(command, parameters, transaction, commandTimeout: commandTimeout);
-
-        // Return the key by assigning the corresponding property in the object - by product is that it supports compound primary keys
-        var id = 0;
-        foreach (var property in keyProperties)
-        {
-            int value = parameters.Get<int>($"newid_{property.Name}");
-            property.SetValue(entityToInsert, value, null);
-            if (id == 0) { id = value; }
-        }
-        return id;
+        sb.AppendFormat("\"{0}\"", columnName);
     }
 
     /// <summary>
-    /// SIM Refactor this into a REF CURSOR returning anonymous block?
+    /// Adds a column equality to a parameter.
     /// </summary>
-    /// <param name="tableName"></param>
-    /// <param name="columnList"></param>
-    /// <param name="parameterList"></param>
-    /// <param name="keyProperties"></param>
-    /// <param name="parameters"></param>
-    /// <returns></returns>
-    protected string CreateInsertSql(string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, OracleDynamicParameters parameters, ColumNameMapperDelegate columNameMapper)
-    {
-        var sb = new StringBuilder();
-        sb.Append($"insert into {tableName} ({columnList}) values ({parameterList})");
-
-        // If no primary key then safe to assume a join table with not too much data to return
-        if (!keyProperties.Any())
-            sb.Append(" RETURNING *");
-        else
-        {
-            sb.Append(" RETURNING ");
-            var first = true;
-            foreach (var property in keyProperties)
-            {
-                if (!first)
-                    sb.Append(", ");
-                first = false;
-                //sb.Append(property.Name);
-                sb.Append(columNameMapper(property));
-                sb.Append(" INTO ");
-
-                string parameterName = $"newid_{property.Name}";
-
-                AppendParameter(sb, parameterName);
-                parameters.Add(parameterName, dbType: OracleDbType.Int64, direction: ParameterDirection.ReturnValue);
-            }
-        }
-        return sb.ToString();
-    }
-
-    public void AppendColumnName(StringBuilder sb, string columnName)
-    {
-        // In Oracle when column names are quoted they are case sensitive. Because 
-        // of this its more user friendly to not quote column names.
-        sb.Append(columnName);
-    }
-
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
     public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
     {
-        AppendColumnName(sb, columnName);
-        sb.Append(" = ");
-        AppendParameter(sb, columnName);
-    }
-
-
-    public void AppendParameter(StringBuilder sb, string parameterName)
-    {
-        sb.Append($":{parameterName}");
-    }
-
-    public void AppendSequenceNextValue(StringBuilder sb, string sequenceName)
-    {
-        sb.Append(sequenceName);
-        sb.Append(".NEXTVAL");
+        sb.AppendFormat("\"{0}\" = @{1}", columnName, columnName);
     }
 }
-#endif
+
+/// <summary>
+/// The Firebase SQL adapeter.
+/// </summary>
+public partial class FbAdapter : ISqlAdapter
+{
+    /// <summary>
+    /// Inserts <paramref name="entityToInsert"/> into the database, returning the Id of the row created.
+    /// </summary>
+    /// <param name="connection">The connection to use.</param>
+    /// <param name="transaction">The transaction to use.</param>
+    /// <param name="commandTimeout">The command timeout to use.</param>
+    /// <param name="tableName">The table to insert into.</param>
+    /// <param name="columnList">The columns to set with this insert.</param>
+    /// <param name="parameterList">The parameters to set for this insert.</param>
+    /// <param name="keyProperties">The key columns in this table.</param>
+    /// <param name="entityToInsert">The entity to insert.</param>
+    /// <returns>The Id of the row created.</returns>
+    public int Insert(IDbConnection connection, IDbTransaction transaction, int? commandTimeout, string tableName, string columnList, string parameterList, IEnumerable<PropertyInfo> keyProperties, object entityToInsert)
+    {
+        var cmd = $"insert into {tableName} ({columnList}) values ({parameterList})";
+        connection.Execute(cmd, entityToInsert, transaction, commandTimeout);
+
+        var propertyInfos = keyProperties as PropertyInfo[] ?? keyProperties.ToArray();
+        var keyName = propertyInfos[0].Name;
+        var r = connection.Query($"SELECT FIRST 1 {keyName} ID FROM {tableName} ORDER BY {keyName} DESC", transaction: transaction, commandTimeout: commandTimeout);
+
+        var id = r.First().ID;
+        if (id == null) return 0;
+        if (propertyInfos.Length == 0) return Convert.ToInt32(id);
+
+        var idp = propertyInfos[0];
+        idp.SetValue(entityToInsert, Convert.ChangeType(id, idp.PropertyType), null);
+
+        return Convert.ToInt32(id);
+    }
+
+    /// <summary>
+    /// Adds the name of a column.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
+    public void AppendColumnName(StringBuilder sb, string columnName)
+    {
+        sb.AppendFormat("{0}", columnName);
+    }
+
+    /// <summary>
+    /// Adds a column equality to a parameter.
+    /// </summary>
+    /// <param name="sb">The string builder  to append to.</param>
+    /// <param name="columnName">The column name.</param>
+    public void AppendColumnNameEqualsValue(StringBuilder sb, string columnName)
+    {
+        sb.AppendFormat("{0} = @{1}", columnName, columnName);
+    }
+}
