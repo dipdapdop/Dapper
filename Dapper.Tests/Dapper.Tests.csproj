@@ -6,7 +6,9 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
-    <TargetFrameworks>net452;netcoreapp1.0;netcoreapp2.0</TargetFrameworks>
+    <!--<TargetFrameworks>net452;netcoreapp1.0;netcoreapp2.0</TargetFrameworks>-->
+    <!-- TODO: Oracle.ManagedDataAccess not compatible with netcoreapp2.0  -->
+    <TargetFrameworks>net452;netcoreapp1.0;</TargetFrameworks>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
