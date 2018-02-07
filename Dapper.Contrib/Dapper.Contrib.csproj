@@ -16,15 +16,29 @@
     <ProjectReference Include="..\Dapper\Dapper.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'net451'">
+    <PackageReference Include="Oracle.ManagedDataAccess">
+      <Version>12.2.1100</Version>
+    </PackageReference>
     <Reference Include="System.Data" />
     <Reference Include="System.Data.Linq" />
     <Reference Include="System" />
     <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
+  <!-- TODO: fork dipdapdop/Dapper - this dep probably shouldn't be here (New Lib, Dapper.Contrib.Oracle -->
+  <!-- TODO: fork dipdapdop/Dapper - ODP.Net Beta
+  <ItemGroup Condition=" '$(TargetFramework)' == 'netstandard1.3' OR '$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="Oracle.ManagedDataAccess" Version="12.2.1100" />
+  </ItemGroup>
+  ends -->
   <ItemGroup Condition=" '$(TargetFramework)' == 'netstandard1.3' OR '$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="Microsoft.CSharp" Version="4.3.0" />
   </ItemGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'netstandard2.0' ">
     <PackageReference Include="System.Reflection.Emit" Version="4.3.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="Oracle.ManagedDataAccess">
+      <Version>12.2.1100</Version>
+    </PackageReference>
   </ItemGroup>
 </Project>

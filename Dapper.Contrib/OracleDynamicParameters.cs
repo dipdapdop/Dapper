@@ -1,8 +1,8 @@
-﻿#if !COREFX
+﻿#if !NETSTANDARD1_3 || NETSTANDARD2_0
 //
 // Fork of https://github.com/vijaysg
 // https://gist.github.com/vijaysg/3096151
-// Extends dapper-dot-net
+// Extends StackOverflow/Dapper
 // + Caren Wong (CW), + Shaun McGrath (SIM)
 //
 
